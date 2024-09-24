@@ -1,0 +1,213 @@
+﻿using AutoMapper;
+using BookSale.Management.Application.Abstracts;
+using BookSale.Management.Application.DTOs;
+using BookSale.Management.Domain.Entities;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Identity;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
+using Microsoft.IdentityModel.Tokens;
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace BookSale.Management.Application.Services
+{
+    public class UserService : IUserService
+    {
+        private readonly UserManager<ApplicationUser> _userManager;
+        private readonly SignInManager<ApplicationUser> _signInManager;
+        private readonly IImageService _imageService;
+        private readonly IMapper _mapper;
+        private readonly ILogger<UserService> _logger;
+
+        public UserService(UserManager<ApplicationUser> userManager, SignInManager<ApplicationUser> signInManager, IImageService imageService, IMapper mapper, ILogger<UserService> logger)
+        {
+            _userManager = userManager;
+            _signInManager = signInManager;
+            _imageService = imageService;
+            _mapper = mapper;
+            _logger = logger;
+        }
+
+
+        public async Task<ResponseDatatable<UserModel>> GetUserByPagination(RequestDatatable requestDatatable)
+        {
+            _logger.LogInformation($"SkipItems: {requestDatatable.SkipItems}, PageSize: {requestDatatable.PageSize}");
+
+            // Tổng số bản ghi trước khi lọc
+            var totalRecords = await _userManager.Users.CountAsync();
+
+            var query = _userManager.Users.AsQueryable();
+
+            // Xử lý tìm kiếm
+            if (!string.IsNullOrEmpty(requestDatatable.Keyword))
+            {
+                if (bool.TryParse(requestDatatable.Keyword, out bool isActive))
+                {
+                    query = query.Where(x => x.IsActive == isActive);
+                }
+                else
+                {
+                    query = query.Where(x =>
+                        x.UserName.Contains(requestDatatable.Keyword) ||
+                        x.Email.Contains(requestDatatable.Keyword) ||
+                        x.Fullname.Contains(requestDatatable.Keyword)
+                    );
+                }
+            }
+
+            // Tổng số bản ghi sau khi lọc
+            var filteredRecords = await query.CountAsync();
+
+            // Phân trang với OrderBy
+            var results = await query
+                .OrderBy(x => x.UserName) // Đảm bảo thứ tự
+                .Skip(requestDatatable.SkipItems)
+                .Take(requestDatatable.PageSize)
+                .Select(x => new UserModel
+                {
+                    Email = x.Email,
+                    Fullname = x.Fullname,
+                    Username = x.UserName,
+                    Phone = x.PhoneNumber,
+                    IsActive = x.IsActive,
+                    Id = x.Id
+                })
+                .ToListAsync();
+
+            _logger.LogInformation($"Total Records: {totalRecords}, Filtered Records: {filteredRecords}, Results Count: {results.Count}");
+
+            return new ResponseDatatable<UserModel>
+            {
+                Draw = requestDatatable.Draw,
+                Data = results,
+                RecordsFiltered = filteredRecords,
+                RecordsTotal = totalRecords
+            };
+        }
+
+
+        public async Task<AccountDTO> GetUserById(string id)
+        {
+            var user = await _userManager.FindByIdAsync(id);
+
+            var role = (await _userManager.GetRolesAsync(user)).First();
+
+            var userDto = _mapper.Map<AccountDTO>(user);
+
+            userDto.RoleName = role;
+
+            //return _mapper.Map<AccountDTO>(user);
+            return userDto;
+        }
+
+        public async Task<ResponseModel> Save(AccountDTO accountDTO)
+        {
+            string errors = string.Empty;
+            IdentityResult identityResult;
+
+            if (string.IsNullOrEmpty(accountDTO.Id))
+            {
+                var applicationUser = new ApplicationUser
+                {
+                    Fullname = accountDTO.Fullname,
+                    UserName = accountDTO.Username,
+                    IsActive = accountDTO.IsActive,
+                    Email = accountDTO.Email,
+                    PhoneNumber = accountDTO.Phone,
+                    Address = accountDTO.Address
+                };
+
+                identityResult = await _userManager.CreateAsync(applicationUser, accountDTO.Password);
+
+                if (identityResult.Succeeded)
+                {
+                    await _userManager.AddToRoleAsync(applicationUser, accountDTO.RoleName);
+
+                    if (accountDTO.Avatar != null)
+                    {
+                        await _imageService.SaveImage(new List<IFormFile> { accountDTO.Avatar }, "img/user", $"{applicationUser.Id}.png");
+                    }
+
+                    return new ResponseModel
+                    {
+                        Action = Domain.Enums.ActionType.Insert,
+                        Message = "OK",
+                        Status = true
+                    };
+                }
+
+                errors = string.Join("<br />", identityResult.Errors.Select(x => x.Description));
+            }
+            else
+            {
+                var user = await _userManager.FindByIdAsync(accountDTO.Id);
+
+                user.Fullname = accountDTO.Fullname;
+                user.IsActive = accountDTO.IsActive;
+                user.Email = accountDTO.Email;
+                user.PhoneNumber = accountDTO.Phone;
+                user.Address = accountDTO.Address;
+
+                identityResult = await _userManager.UpdateAsync(user);
+
+                if (identityResult.Succeeded)
+                {
+                    if (accountDTO.Avatar != null)
+                    {
+                        await _imageService.SaveImage(new List<IFormFile> { accountDTO.Avatar }, "img/user", $"{user.Id}.png");
+                    }
+
+                    var hasRole = await _userManager.IsInRoleAsync(user, accountDTO.RoleName);
+
+                    if (!hasRole)
+                    {
+                        var oldRoleName = (await _userManager.GetRolesAsync(user)).FirstOrDefault();
+
+                        var removeResult = await _userManager.RemoveFromRoleAsync(user, oldRoleName);
+
+                        if (removeResult.Succeeded)
+                        {
+                            await _userManager.AddToRoleAsync(user, accountDTO.RoleName);
+                        }
+                    }
+
+                    return new ResponseModel
+                    {
+                        Status = true,
+                        Message = "Cập nhật thành công.",
+                        Action = Domain.Enums.ActionType.Update
+                    };
+                }
+
+                errors = string.Join("<br />", identityResult.Errors.Select(x => x.Description));
+            }
+
+            return new ResponseModel
+            {
+                Action = string.IsNullOrEmpty(accountDTO.Id) ? Domain.Enums.ActionType.Insert : Domain.Enums.ActionType.Update,
+                Message = string.IsNullOrEmpty(errors) ? "Thực hiện thành công." : $"Thực hiện thất bại. {errors}",
+                Status = string.IsNullOrEmpty(errors)
+            };
+        }
+
+        public async Task<bool> DeleteAsync(string id)
+        {
+            var user = await _userManager.FindByIdAsync(id);
+
+            if (user is not null)
+            {
+                user.IsActive = false;
+                await _userManager.UpdateAsync(user);
+
+                return true;
+            }
+
+            return false;
+
+        }
+    }
+}

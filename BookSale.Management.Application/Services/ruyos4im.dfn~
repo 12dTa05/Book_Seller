@@ -1,0 +1,58 @@
+﻿using BookSale.Management.Application.Abstracts;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Http;
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Threading.Tasks;
+
+namespace BookSale.Management.Application.Services
+{
+    public class ImageService : IImageService
+    {
+        private readonly IWebHostEnvironment _webHostEnvironment;
+
+        public ImageService(IWebHostEnvironment webHostEnvironment)
+        {
+            _webHostEnvironment = webHostEnvironment;
+        }
+
+        public async Task<bool> SaveImage(IFormFile image, string path, string fileName)
+        {
+            if (image == null || image.Length == 0)
+            {
+                return false;
+            }
+
+            try
+            {
+                string uploadPath = Path.Combine(Directory.GetCurrentDirectory(), "wwwroot", path);
+
+                // Đảm bảo thư mục tồn tại
+                if (!Directory.Exists(uploadPath))
+                {
+                    Directory.CreateDirectory(uploadPath);
+                }
+
+                // Tạo đường dẫn file
+                string filePath = Path.Combine(uploadPath, fileName);
+
+                // Lưu file vào đường dẫn
+                using (var stream = new FileStream(filePath, FileMode.Create))
+                {
+                    await image.CopyToAsync(stream);
+                }
+
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+
+
+    }
+}
